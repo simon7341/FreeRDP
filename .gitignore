@@ -3,3 +3,5 @@
 build
 checker
 abi-checker
+.cache
+.vscode
