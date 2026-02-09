@@ -19,6 +19,7 @@
 option(WITH_SHADOW "Compile with shadow server" ON)
 option(WITH_PROXY "Compile with proxy server" ON)
 option(WITH_PLATFORM_SERVER "Compile with platform server" ON)
+option(WITH_TSFUSE_SERVER "Compile tsclient macFUSE server" OFF)
 
 add_subdirectory(common)
 if(WITH_SHADOW)
@@ -52,6 +53,14 @@ if(WITH_PLATFORM_SERVER)
 
   if(WITH_FREERDS AND (IS_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/FreeRDS"))
     add_subdirectory("FreeRDS")
+  endif()
+endif()
+
+if(WITH_TSFUSE_SERVER)
+  if(APPLE)
+    add_subdirectory(tsclient)
+  else()
+    message(WARNING "tsclient macFUSE server is only supported on macOS.")
   endif()
 endif()
 

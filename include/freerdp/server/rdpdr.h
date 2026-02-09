@@ -106,6 +106,16 @@ typedef UINT (*psRdpdrDriveDeleteFile)(RdpdrServerContext* context, void* callba
                                        UINT32 deviceId, const char* path);
 typedef UINT (*psRdpdrDriveRenameFile)(RdpdrServerContext* context, void* callbackData,
                                        UINT32 deviceId, const char* oldPath, const char* newPath);
+typedef UINT (*psRdpdrDriveQueryInformation)(RdpdrServerContext* context, void* callbackData,
+                                             UINT32 deviceId, UINT32 fileId,
+                                             UINT32 FsInformationClass);
+typedef UINT (*psRdpdrDriveQueryVolumeInformation)(RdpdrServerContext* context, void* callbackData,
+                                                   UINT32 deviceId, UINT32 FsInformationClass);
+typedef UINT (*psRdpdrDriveQueryInformation)(RdpdrServerContext* context, void* callbackData,
+                                             UINT32 deviceId, UINT32 fileId,
+                                             UINT32 FsInformationClass);
+typedef UINT (*psRdpdrDriveQueryVolumeInformation)(RdpdrServerContext* context, void* callbackData,
+                                                   UINT32 deviceId, UINT32 FsInformationClass);
 
 typedef void (*psRdpdrOnDriveCreateDirectoryComplete)(RdpdrServerContext* context,
                                                       void* callbackData, UINT32 ioStatus);
@@ -126,6 +136,18 @@ typedef void (*psRdpdrOnDriveDeleteFileComplete)(RdpdrServerContext* context, vo
                                                  UINT32 ioStatus);
 typedef void (*psRdpdrOnDriveRenameFileComplete)(RdpdrServerContext* context, void* callbackData,
                                                  UINT32 ioStatus);
+typedef void (*psRdpdrOnDriveQueryInformationComplete)(RdpdrServerContext* context,
+                                                       void* callbackData, UINT32 ioStatus,
+                                                       const BYTE* buffer, UINT32 length);
+typedef void (*psRdpdrOnDriveQueryVolumeInformationComplete)(RdpdrServerContext* context,
+                                                             void* callbackData, UINT32 ioStatus,
+                                                             const BYTE* buffer, UINT32 length);
+typedef void (*psRdpdrOnDriveQueryInformationComplete)(RdpdrServerContext* context,
+                                                       void* callbackData, UINT32 ioStatus,
+                                                       const BYTE* buffer, UINT32 length);
+typedef void (*psRdpdrOnDriveQueryVolumeInformationComplete)(RdpdrServerContext* context,
+                                                             void* callbackData, UINT32 ioStatus,
+                                                             const BYTE* buffer, UINT32 length);
 
 typedef UINT (*psRdpdrOnDeviceCreate)(RdpdrServerContext* context, const RdpdrDevice* device);
 typedef UINT (*psRdpdrOnDeviceDelete)(RdpdrServerContext* context, UINT32 deviceId);
@@ -177,6 +199,8 @@ struct s_rdpdr_server_context
 	psRdpdrDriveCloseFile DriveCloseFile;
 	psRdpdrDriveDeleteFile DriveDeleteFile;
 	psRdpdrDriveRenameFile DriveRenameFile;
+	psRdpdrDriveQueryInformation DriveQueryInformation;
+	psRdpdrDriveQueryVolumeInformation DriveQueryVolumeInformation;
 
 	/*** Drive callbacks registered by the server. ***/
 	psRdpdrOnDeviceCreate OnDriveCreate; /**< Called for devices of type \b RDPDR_DTYP_FILESYSTEM
@@ -192,6 +216,8 @@ struct s_rdpdr_server_context
 	psRdpdrOnDriveCloseFileComplete OnDriveCloseFileComplete;
 	psRdpdrOnDriveDeleteFileComplete OnDriveDeleteFileComplete;
 	psRdpdrOnDriveRenameFileComplete OnDriveRenameFileComplete;
+	psRdpdrOnDriveQueryInformationComplete OnDriveQueryInformationComplete;
+	psRdpdrOnDriveQueryVolumeInformationComplete OnDriveQueryVolumeInformationComplete;
 
 	/*** Serial Port callbacks registered by the server. ***/
 	psRdpdrOnDeviceCreate OnSerialPortCreate; /**< Called for devices of type \b RDPDR_DTYP_SERIAL
