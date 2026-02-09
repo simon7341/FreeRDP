@@ -2584,6 +2584,38 @@ static UINT rdpdr_server_send_device_query_volume_information_request(RdpdrServe
 	return rdpdr_seal_send_free_request(context, s);
 }
 
+static UINT rdpdr_server_send_device_set_information_request(RdpdrServerContext* context,
+                                                             UINT32 deviceId, UINT32 fileId,
+                                                             UINT32 completionId,
+                                                             UINT32 FsInformationClass,
+                                                             const BYTE* buffer, UINT32 length)
+{
+	wStream* s = NULL;
+	WINPR_ASSERT(context);
+	WINPR_ASSERT(context->priv);
+
+	WLog_Print(context->priv->log, WLOG_DEBUG,
+	           "RdpdrServerSendDeviceSetInformationRequest: deviceId=%" PRIu32 ", fileId=%" PRIu32
+	           ", class=%s, length=%" PRIu32,
+	           deviceId, fileId, FSInformationClass2Tag(FsInformationClass), length);
+	s = Stream_New(NULL, 64 + length);
+
+	if (!s)
+	{
+		WLog_Print(context->priv->log, WLOG_ERROR, "Stream_New failed!");
+		return CHANNEL_RC_NO_MEMORY;
+	}
+
+	rdpdr_server_write_device_iorequest(s, deviceId, fileId, completionId, IRP_MJ_SET_INFORMATION,
+	                                    0);
+	Stream_Write_UINT32(s, FsInformationClass); /* FsInformationClass (4 bytes) */
+	Stream_Write_UINT32(s, length);             /* Length (4 bytes) */
+	Stream_Zero(s, 24);                         /* Padding (24 bytes) */
+	if (buffer && length > 0)
+		Stream_Write(s, buffer, length);
+	return rdpdr_seal_send_free_request(context, s);
+}
+
 /**
  * Function description
  *
@@ -3734,6 +3766,62 @@ static UINT rdpdr_server_drive_rename_file(RdpdrServerContext* context, void* ca
 	                                               FILE_SYNCHRONOUS_IO_NONALERT, FILE_OPEN);
 }
 
+static UINT rdpdr_server_drive_set_information_callback(RdpdrServerContext* context, wStream* s,
+                                                        RDPDR_IRP* irp, UINT32 deviceId,
+                                                        UINT32 completionId, UINT32 ioStatus)
+{
+	WINPR_ASSERT(context);
+	WINPR_ASSERT(context->priv);
+	WINPR_ASSERT(irp);
+	WLog_Print(context->priv->log, WLOG_DEBUG,
+	           "RdpdrServerDriveSetInformationCallback: deviceId=%" PRIu32
+	           ", completionId=%" PRIu32 ", ioStatus=0x%" PRIx32 "",
+	           deviceId, completionId, ioStatus);
+
+	if (!Stream_CheckAndLogRequiredLengthWLog(context->priv->log, s, 5))
+		return ERROR_INVALID_DATA;
+
+	Stream_Seek(s, 5); /* Length (4 bytes) + padding (1 byte) */
+	context->OnDriveSetInformationComplete(context, irp->CallbackData, ioStatus);
+	rdpdr_server_irp_free(irp);
+	return CHANNEL_RC_OK;
+}
+
+static UINT rdpdr_server_drive_set_information(RdpdrServerContext* context, void* callbackData,
+                                               UINT32 deviceId, UINT32 fileId,
+                                               UINT32 FsInformationClass, const BYTE* buffer,
+                                               UINT32 length)
+{
+	RDPDR_IRP* irp = rdpdr_server_irp_new();
+	WINPR_ASSERT(context);
+	WINPR_ASSERT(context->priv);
+	WINPR_ASSERT(irp);
+
+	if (!irp)
+	{
+		WLog_Print(context->priv->log, WLOG_ERROR, "rdpdr_server_irp_new failed!");
+		return CHANNEL_RC_NO_MEMORY;
+	}
+
+	irp->CompletionId = context->priv->NextCompletionId++;
+	irp->Callback = rdpdr_server_drive_set_information_callback;
+	irp->CallbackData = callbackData;
+	irp->DeviceId = deviceId;
+	irp->FileId = fileId;
+
+	if (!rdpdr_server_enqueue_irp(context, irp))
+	{
+		WLog_Print(context->priv->log, WLOG_ERROR, "rdpdr_server_enqueue_irp failed!");
+		rdpdr_server_irp_free(irp);
+		return ERROR_INTERNAL_ERROR;
+	}
+
+	// NOLINTNEXTLINE(clang-analyzer-unix.Malloc): rdpdr_server_enqueue_irp owns irp
+	return rdpdr_server_send_device_set_information_request(context, deviceId, fileId,
+	                                                        irp->CompletionId, FsInformationClass,
+	                                                        buffer, length);
+}
+
 static UINT rdpdr_server_drive_query_information_callback(RdpdrServerContext* context, wStream* s,
                                                           RDPDR_IRP* irp, UINT32 deviceId,
                                                           UINT32 completionId, UINT32 ioStatus)
@@ -3942,6 +4030,7 @@ RdpdrServerContext* rdpdr_server_context_new(HANDLE vcm)
 	context->DriveRenameFile = rdpdr_server_drive_rename_file;
 	context->DriveQueryInformation = rdpdr_server_drive_query_information;
 	context->DriveQueryVolumeInformation = rdpdr_server_drive_query_volume_information;
+	context->DriveSetInformation = rdpdr_server_drive_set_information;
 	context->priv = rdpdr_server_private_new();
 	if (!context->priv)
 		goto fail;

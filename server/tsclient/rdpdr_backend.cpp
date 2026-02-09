@@ -51,6 +51,7 @@ void RdpdrBackend::AttachServerContext(RdpdrServerContext* context)
 	server_context_->OnDriveQueryDirectoryComplete = OnDriveQueryDirectoryComplete;
 	server_context_->OnDriveQueryInformationComplete = OnDriveQueryInformationComplete;
 	server_context_->OnDriveQueryVolumeInformationComplete = OnDriveQueryVolumeInformationComplete;
+	server_context_->OnDriveSetInformationComplete = OnDriveSetInformationComplete;
 }
 
 void RdpdrBackend::DetachServerContext()
@@ -109,6 +110,8 @@ void RdpdrBackend::CancelAll(RdpdrError error)
 				write->promise.set_value(WriteResult{ error, 0 });
 			else if (auto* dir = dynamic_cast<PendingQueryDirectory*>(entry.first))
 				dir->promise.set_value(QueryDirectoryResult{ error, {} });
+			else if (auto* info = dynamic_cast<PendingSetInfo*>(entry.first))
+				info->promise.set_value(RdpdrResult{ error, {} });
 		}
 	}
 }
@@ -309,6 +312,34 @@ QueryInfoResult RdpdrBackend::QueryVolumeInformation(std::uint32_t device_id, st
 	RegisterPending(pending_ptr);
 	if (server_context_->DriveQueryVolumeInformation(server_context_, pending_ptr, device_id,
 	                                                info_class) != CHANNEL_RC_OK)
+	{
+		UnregisterPending(pending_ptr);
+		return { RdpdrError::TransportError, {} };
+	}
+	auto future = pending_ptr->promise.get_future();
+	if (future.wait_for(timeout) == std::future_status::timeout)
+	{
+		pending_ptr->completed.exchange(true);
+		return { RdpdrError::Timeout, {} };
+	}
+	return future.get();
+}
+
+RdpdrResult RdpdrBackend::SetInformation(const FileHandle& handle, std::uint32_t info_class,
+                                         const std::vector<std::uint8_t>& payload,
+                                         std::chrono::milliseconds timeout)
+{
+	if (!server_context_)
+		return { RdpdrError::NotConnected, {} };
+
+	auto pending = std::make_unique<PendingSetInfo>();
+	auto* pending_ptr = pending.get();
+	RegisterPending(pending_ptr);
+	if (!server_context_->DriveSetInformation ||
+	    server_context_->DriveSetInformation(server_context_, pending_ptr, handle.device_id,
+	                                         handle.file_id, info_class,
+	                                         payload.empty() ? nullptr : payload.data(),
+	                                         static_cast<UINT32>(payload.size())) != CHANNEL_RC_OK)
 	{
 		UnregisterPending(pending_ptr);
 		return { RdpdrError::TransportError, {} };
@@ -671,6 +702,22 @@ void RdpdrBackend::OnDriveQueryVolumeInformationComplete(RdpdrServerContext* con
                                                         const BYTE* buffer, UINT32 length)
 {
 	OnDriveQueryInformationComplete(context, callbackData, ioStatus, buffer, length);
+}
+
+void RdpdrBackend::OnDriveSetInformationComplete(RdpdrServerContext* context, void* callbackData,
+                                                UINT32 ioStatus)
+{
+	auto* backend = static_cast<RdpdrBackend*>(context ? context->data : nullptr);
+	auto* pending = static_cast<PendingSetInfo*>(callbackData);
+	if (!backend || !pending)
+		return;
+
+	RdpdrResult result;
+	result.error = backend->MapStatusToError(ioStatus);
+
+	if (!pending->completed.exchange(true))
+		pending->promise.set_value(std::move(result));
+	backend->UnregisterPending(pending);
 }
 
 } // namespace tsclient

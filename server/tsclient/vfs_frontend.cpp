@@ -11,6 +11,7 @@
 #include <freerdp/log.h>
 #include <freerdp/channels/rdpdr.h>
 #include <winpr/file.h>
+#include <winpr/string.h>
 
 #if defined(TSCLIENT_WITH_MACFUSE)
 #include <fuse/fuse.h>
@@ -53,6 +54,15 @@ time_t FileTimeToUnixSeconds(std::uint64_t filetime)
 	return static_cast<time_t>((filetime - kFileTimeToUnixEpoch) / 10000000ULL);
 }
 
+std::uint64_t UnixTimeToFileTime(time_t seconds, long nanoseconds)
+{
+	if (seconds <= 0)
+		return 0;
+	const std::uint64_t base = static_cast<std::uint64_t>(seconds) * 10000000ULL;
+	const std::uint64_t extra = static_cast<std::uint64_t>(nanoseconds / 100);
+	return kFileTimeToUnixEpoch + base + extra;
+}
+
 std::string ParentRemotePath(const std::string& remote_path)
 {
 	if (remote_path.empty() || remote_path == "\\")
@@ -61,6 +71,66 @@ std::string ParentRemotePath(const std::string& remote_path)
 	if (pos == std::string::npos || pos == 0)
 		return "\\";
 	return remote_path.substr(0, pos);
+}
+
+std::string ParentLocalPath(const std::string& absolute_path)
+{
+	if (absolute_path.empty())
+		return absolute_path;
+	const auto pos = absolute_path.find_last_of('/');
+	if (pos == std::string::npos || pos == 0)
+		return "/";
+	return absolute_path.substr(0, pos);
+}
+
+std::string JoinPath(const std::string& base, const std::string& relative)
+{
+	if (base.empty())
+		return relative;
+	if (relative.empty())
+		return base;
+	if (base.back() == '/')
+		return base + relative;
+	return base + "/" + relative;
+}
+
+int SendLinkRequest(RdpdrBackend* backend, const PathMapper& mapper, const std::string& link_path,
+                    const std::string& target_path, std::chrono::milliseconds timeout)
+{
+	const auto link_abs = mapper.IsRoot(link_path) ? link_path : link_path;
+	const auto target_abs = mapper.IsRoot(target_path) ? target_path : target_path;
+
+	const auto link_mapped = mapper.MapPath(link_abs);
+	const auto target_mapped = mapper.MapPath(target_abs);
+	if (!link_mapped || !target_mapped)
+		return -ENOENT;
+	if (link_mapped->device_id != target_mapped->device_id)
+		return -EXDEV;
+
+	auto open = backend->OpenFile(target_mapped->device_id, target_mapped->remote_path,
+	                             FILE_READ_ATTRIBUTES, FILE_OPEN, timeout);
+	if (open.error != RdpdrError::Ok)
+		return MapError(open.error);
+
+	size_t wlen = 0;
+	WCHAR* wpath = ConvertUtf8ToWCharAlloc(link_mapped->remote_path.c_str(), &wlen);
+	if (!wpath)
+	{
+		backend->CloseFile(open.handle, timeout);
+		return -ENOMEM;
+	}
+	const std::uint32_t name_bytes = static_cast<std::uint32_t>(wlen * sizeof(WCHAR));
+	std::vector<std::uint8_t> payload(6 + name_bytes, 0);
+	payload[0] = 0; // ReplaceIfExists
+	payload[1] = 0; // RootDirectory
+	std::memcpy(payload.data() + 2, &name_bytes, sizeof(name_bytes));
+	std::memcpy(payload.data() + 6, wpath, name_bytes);
+	free(wpath);
+
+	auto result =
+	    backend->SetInformation(open.handle, FileLinkInformation, payload, timeout);
+	backend->CloseFile(open.handle, timeout);
+	return MapError(result.error);
 }
 
 bool PopulateStatFromInfo(const QueryInfoResult& basic, const QueryInfoResult& standard,
@@ -145,6 +215,136 @@ bool MacFuseFrontend::StartMount()
 			auto* self = static_cast<MacFuseFrontend*>(fuse_get_context()->private_data);
 			return self->HandleReadDir(self->ToAbsolutePath(path), buf, filler);
 		};
+		ops.symlink = [](const char* target, const char* linkpath) -> int {
+			auto* self = static_cast<MacFuseFrontend*>(fuse_get_context()->private_data);
+			if (!target || !linkpath)
+				return -EINVAL;
+
+			std::string target_abs;
+			if (target[0] == '/')
+				target_abs = self->ToAbsolutePath(target);
+			else
+				target_abs =
+				    JoinPath(ParentLocalPath(self->ToAbsolutePath(linkpath)), target);
+
+			const std::string link_abs = self->ToAbsolutePath(linkpath);
+			const int status =
+			    SendLinkRequest(self->backend_, self->mapper_, link_abs, target_abs, self->op_timeout_);
+			if (status == 0)
+			{
+				self->directory_cache_.Erase(ParentLocalPath(link_abs));
+				self->metadata_cache_.Erase(link_abs);
+			}
+			return status;
+		};
+		ops.link = [](const char* from, const char* to) -> int {
+			auto* self = static_cast<MacFuseFrontend*>(fuse_get_context()->private_data);
+			if (!from || !to)
+				return -EINVAL;
+			const std::string from_abs = self->ToAbsolutePath(from);
+			const std::string to_abs = self->ToAbsolutePath(to);
+			const int status =
+			    SendLinkRequest(self->backend_, self->mapper_, to_abs, from_abs, self->op_timeout_);
+			if (status == 0)
+			{
+				self->directory_cache_.Erase(ParentLocalPath(to_abs));
+				self->metadata_cache_.Erase(to_abs);
+			}
+			return status;
+		};
+		ops.truncate = [](const char* path, off_t size) -> int {
+			auto* self = static_cast<MacFuseFrontend*>(fuse_get_context()->private_data);
+			const auto mapped = self->mapper_.MapPath(self->ToAbsolutePath(path));
+			if (!mapped)
+				return -ENOENT;
+			auto open = self->backend_->OpenFile(mapped->device_id, mapped->remote_path,
+			                                   FILE_WRITE_DATA, FILE_OPEN, self->op_timeout_);
+			if (open.error != RdpdrError::Ok)
+				return MapError(open.error);
+			std::uint64_t end = static_cast<std::uint64_t>(size);
+			std::vector<std::uint8_t> payload(sizeof(end));
+			std::memcpy(payload.data(), &end, sizeof(end));
+			auto result = self->backend_->SetInformation(open.handle, FileEndOfFileInformation,
+			                                           payload, self->op_timeout_);
+			self->backend_->CloseFile(open.handle, self->op_timeout_);
+			if (result.error != RdpdrError::Ok)
+				return MapError(result.error);
+			self->metadata_cache_.Erase(self->ToAbsolutePath(path));
+			return 0;
+		};
+		ops.utimens = [](const char* path, const struct timespec ts[2]) -> int {
+			auto* self = static_cast<MacFuseFrontend*>(fuse_get_context()->private_data);
+			const auto mapped = self->mapper_.MapPath(self->ToAbsolutePath(path));
+			if (!mapped)
+				return -ENOENT;
+
+			auto open = self->backend_->OpenFile(mapped->device_id, mapped->remote_path,
+			                                   FILE_WRITE_ATTRIBUTES | FILE_READ_ATTRIBUTES,
+			                                   FILE_OPEN, self->op_timeout_);
+			if (open.error != RdpdrError::Ok)
+				return MapError(open.error);
+
+			auto info =
+			    self->backend_->QueryInformation(open.handle, FileBasicInformation, self->op_timeout_);
+			if (info.error != RdpdrError::Ok)
+			{
+				self->backend_->CloseFile(open.handle, self->op_timeout_);
+				return MapError(info.error);
+			}
+
+			std::uint64_t creation_time = 0;
+			std::uint64_t last_access_time = 0;
+			std::uint64_t last_write_time = 0;
+			std::uint64_t change_time = 0;
+			std::uint32_t file_attributes = FILE_ATTRIBUTE_NORMAL;
+			if (info.payload.size() >= 36)
+			{
+				std::memcpy(&creation_time, info.payload.data(), sizeof(creation_time));
+				std::memcpy(&last_access_time, info.payload.data() + 8, sizeof(last_access_time));
+				std::memcpy(&last_write_time, info.payload.data() + 16, sizeof(last_write_time));
+				std::memcpy(&change_time, info.payload.data() + 24, sizeof(change_time));
+				std::memcpy(&file_attributes, info.payload.data() + 32, sizeof(file_attributes));
+			}
+
+			std::uint64_t access = 0;
+			std::uint64_t write = 0;
+			if (ts)
+			{
+				access = UnixTimeToFileTime(ts[0].tv_sec, ts[0].tv_nsec);
+				write = UnixTimeToFileTime(ts[1].tv_sec, ts[1].tv_nsec);
+			}
+			else
+			{
+				const auto now = std::chrono::system_clock::now();
+				const auto secs = std::chrono::system_clock::to_time_t(now);
+				const auto nsecs =
+				    std::chrono::duration_cast<std::chrono::nanoseconds>(
+				        now.time_since_epoch())
+				        .count() %
+				    1000000000LL;
+				access = UnixTimeToFileTime(secs, static_cast<long>(nsecs));
+				write = access;
+			}
+			if (access != 0)
+				last_access_time = access;
+			if (write != 0)
+				last_write_time = write;
+
+			std::vector<std::uint8_t> payload(36, 0);
+			std::memcpy(payload.data(), &creation_time, sizeof(creation_time));
+			std::memcpy(payload.data() + 8, &last_access_time, sizeof(last_access_time));
+			std::memcpy(payload.data() + 16, &last_write_time, sizeof(last_write_time));
+			std::memcpy(payload.data() + 24, &change_time, sizeof(change_time));
+			std::memcpy(payload.data() + 32, &file_attributes, sizeof(file_attributes));
+
+			auto result = self->backend_->SetInformation(open.handle, FileBasicInformation, payload,
+			                                           self->op_timeout_);
+			self->backend_->CloseFile(open.handle, self->op_timeout_);
+			if (result.error != RdpdrError::Ok)
+				return MapError(result.error);
+			self->metadata_cache_.Erase(self->ToAbsolutePath(path));
+			return 0;
+		};
 		ops.statfs = [](const char* path, struct statvfs* stbuf) -> int {
 			auto* self = static_cast<MacFuseFrontend*>(fuse_get_context()->private_data);
 			return self->HandleStatFs(self->ToAbsolutePath(path), stbuf);
@@ -178,6 +378,8 @@ bool MacFuseFrontend::StartMount()
 			                                     self->op_timeout_);
 			if (result.error != RdpdrError::Ok)
 				return MapError(result.error);
+			self->directory_cache_.Erase(ParentLocalPath(self->ToAbsolutePath(path)));
+			self->metadata_cache_.Erase(self->ToAbsolutePath(path));
 			MacFuseFrontend::HandleState state;
 			state.handle = result.handle;
 			state.is_directory = false;
@@ -240,6 +442,7 @@ bool MacFuseFrontend::StartMount()
 				self->backend_->CloseFile(handle, self->op_timeout_);
 			if (result.error != RdpdrError::Ok)
 				return MapError(result.error);
+			self->metadata_cache_.Erase(self->ToAbsolutePath(path));
 			return static_cast<int>(result.bytes_written);
 		};
 		ops.release = [](const char*, struct fuse_file_info* fi) -> int {
@@ -259,6 +462,8 @@ bool MacFuseFrontend::StartMount()
 				return -ENOENT;
 			auto result = self->backend_->CreateDirectory(mapped->device_id, mapped->remote_path,
 			                                            self->op_timeout_);
+			if (result.error == RdpdrError::Ok)
+				self->directory_cache_.Erase(ParentLocalPath(self->ToAbsolutePath(path)));
 			return MapError(result.error);
 		};
 		ops.rmdir = [](const char* path) -> int {
@@ -268,6 +473,11 @@ bool MacFuseFrontend::StartMount()
 				return -ENOENT;
 			auto result = self->backend_->DeleteDirectory(mapped->device_id, mapped->remote_path,
 			                                            self->op_timeout_);
+			if (result.error == RdpdrError::Ok)
+			{
+				self->directory_cache_.Erase(ParentLocalPath(self->ToAbsolutePath(path)));
+				self->metadata_cache_.Erase(self->ToAbsolutePath(path));
+			}
 			return MapError(result.error);
 		};
 		ops.unlink = [](const char* path) -> int {
@@ -277,6 +487,11 @@ bool MacFuseFrontend::StartMount()
 				return -ENOENT;
 			auto result = self->backend_->DeleteFile(mapped->device_id, mapped->remote_path,
 			                                       self->op_timeout_);
+			if (result.error == RdpdrError::Ok)
+			{
+				self->directory_cache_.Erase(ParentLocalPath(self->ToAbsolutePath(path)));
+				self->metadata_cache_.Erase(self->ToAbsolutePath(path));
+			}
 			return MapError(result.error);
 		};
 #if FUSE_USE_VERSION >= 30
@@ -288,6 +503,13 @@ bool MacFuseFrontend::StartMount()
 				return -ENOENT;
 			auto result = self->backend_->RenameFile(from_mapped->device_id, from_mapped->remote_path,
 			                                       to_mapped->remote_path, self->op_timeout_);
+			if (result.error == RdpdrError::Ok)
+			{
+				self->directory_cache_.Erase(ParentLocalPath(self->ToAbsolutePath(from)));
+				self->directory_cache_.Erase(ParentLocalPath(self->ToAbsolutePath(to)));
+				self->metadata_cache_.Erase(self->ToAbsolutePath(from));
+				self->metadata_cache_.Erase(self->ToAbsolutePath(to));
+			}
 			return MapError(result.error);
 		};
 #else
@@ -299,6 +521,13 @@ bool MacFuseFrontend::StartMount()
 				return -ENOENT;
 			auto result = self->backend_->RenameFile(from_mapped->device_id, from_mapped->remote_path,
 			                                       to_mapped->remote_path, self->op_timeout_);
+			if (result.error == RdpdrError::Ok)
+			{
+				self->directory_cache_.Erase(ParentLocalPath(self->ToAbsolutePath(from)));
+				self->directory_cache_.Erase(ParentLocalPath(self->ToAbsolutePath(to)));
+				self->metadata_cache_.Erase(self->ToAbsolutePath(from));
+				self->metadata_cache_.Erase(self->ToAbsolutePath(to));
+			}
 			return MapError(result.error);
 		};
 #endif

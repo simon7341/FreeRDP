@@ -103,6 +103,9 @@ class RdpdrBackend
 	                                 std::chrono::milliseconds timeout);
 	QueryInfoResult QueryVolumeInformation(std::uint32_t device_id, std::uint32_t info_class,
 	                                       std::chrono::milliseconds timeout);
+	RdpdrResult SetInformation(const FileHandle& handle, std::uint32_t info_class,
+	                           const std::vector<std::uint8_t>& payload,
+	                           std::chrono::milliseconds timeout);
 
   private:
 	struct PendingRequest
@@ -141,6 +144,10 @@ class RdpdrBackend
 	{
 		std::promise<QueryInfoResult> promise;
 	};
+	struct PendingSetInfo final : PendingBase
+	{
+		std::promise<RdpdrResult> promise;
+	};
 
 	RdpdrResult SendRequestAndWait(const std::vector<std::uint8_t>& packet,
 	                               std::chrono::milliseconds timeout);
@@ -178,6 +185,8 @@ class RdpdrBackend
 	static void OnDriveQueryVolumeInformationComplete(RdpdrServerContext* context,
 	                                                  void* callbackData, UINT32 ioStatus,
 	                                                  const BYTE* buffer, UINT32 length);
+	static void OnDriveSetInformationComplete(RdpdrServerContext* context, void* callbackData,
+	                                          UINT32 ioStatus);
 
 	IRdpdrTransport* transport_ = nullptr;
 	RdpdrServerContext* server_context_ = nullptr;

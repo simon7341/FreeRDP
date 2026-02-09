@@ -16,6 +16,8 @@ set(SRCS
     rdpdr_transport.h
     vfs_frontend.cpp
     vfs_frontend.h
+    winfsp_frontend.cpp
+    winfsp_frontend.h
     path_mapper.cpp
     path_mapper.h
     ttl_cache.h
@@ -45,6 +47,25 @@ if(WITH_MACFUSE)
   target_compile_definitions(${MODULE_NAME} PRIVATE TSCLIENT_WITH_MACFUSE=1)
   target_compile_definitions(${MODULE_NAME} PRIVATE FUSE_USE_VERSION=29 _FILE_OFFSET_BITS=64)
   target_link_libraries(${MODULE_NAME} ${MACFUSE_LIBRARY})
+endif()
+
+option(WITH_WINFSP_SERVER "Enable WinFsp frontend (Windows)" OFF)
+if(WITH_WINFSP_SERVER)
+  if(WIN32)
+    find_path(WINFSP_INCLUDE_DIR winfsp/winfsp.h)
+    if(NOT WINFSP_INCLUDE_DIR)
+      message(FATAL_ERROR "WinFsp headers not found. Install WinFsp or disable WITH_WINFSP_SERVER.")
+    endif()
+    find_library(WINFSP_LIBRARY NAMES winfsp-x64 winfsp)
+    if(NOT WINFSP_LIBRARY)
+      message(FATAL_ERROR "WinFsp library not found. Install WinFsp or disable WITH_WINFSP_SERVER.")
+    endif()
+    target_include_directories(${MODULE_NAME} PRIVATE ${WINFSP_INCLUDE_DIR})
+    target_compile_definitions(${MODULE_NAME} PRIVATE TSCLIENT_WITH_WINFSP=1)
+    target_link_libraries(${MODULE_NAME} ${WINFSP_LIBRARY})
+  else()
+    message(WARNING "WITH_WINFSP_SERVER is ON but this is not a Windows build. Ignoring.")
+  endif()
 endif()
 
 install(TARGETS ${MODULE_NAME} DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT server)

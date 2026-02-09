@@ -11,6 +11,7 @@
 #include "rdp_server_core.h"
 #include "rdpdr_backend.h"
 #include "vfs_frontend.h"
+#include "winfsp_frontend.h"
 
 #define TAG SERVER_TAG("tsclient-main")
 
@@ -23,7 +24,11 @@ int main(int argc, char** argv)
 	winpr_InitializeSSL(WINPR_SSL_INIT_DEFAULT);
 
 	ServerConfig config;
+#if defined(_WIN32)
+	std::string mount_root = "T:";
+#else
 	std::string mount_root = "/Volumes/tsclient";
+#endif
 
 	for (int i = 1; i < argc; ++i)
 	{
@@ -50,7 +55,11 @@ int main(int argc, char** argv)
 	pthread_sigmask(SIG_BLOCK, &sigset, nullptr);
 
 	RdpdrBackend backend(nullptr);
+#if defined(_WIN32)
+	WinFspFrontend vfs(&backend, mount_root);
+#else
 	MacFuseFrontend vfs(&backend, mount_root);
+#endif
 	RdpServerCore server(&backend);
 
 	if (!server.Start(config, &vfs))

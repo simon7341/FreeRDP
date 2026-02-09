@@ -38,6 +38,10 @@
 #include <winpr/string.h>
 #include <winpr/path.h>
 #include <winpr/file.h>
+
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 #include <winpr/stream.h>
 
 #include <freerdp/channels/rdpdr.h>
@@ -864,6 +868,69 @@ static BOOL drive_file_set_rename_information(DRIVE_FILE* file, UINT32 Length, w
 	return TRUE;
 }
 
+static BOOL drive_file_set_link_information(DRIVE_FILE* file, UINT32 Length, wStream* input)
+{
+	WINPR_ASSERT(file);
+
+	const uint32_t expect = 6;
+	if (Length < expect)
+	{
+		WLog_WARN(TAG, "Unexpected Length=%" PRIu32 ", expected at least %" PRIu32, Length, expect);
+		return FALSE;
+	}
+
+	const uint8_t ReplaceIfExists = Stream_Get_UINT8(input);
+	Stream_Seek_UINT8(input); /* RootDirectory */
+	const uint32_t FileNameLength = Stream_Get_UINT32(input);
+
+	if (Length != expect + FileNameLength)
+	{
+		WLog_WARN(TAG, "Unexpected Length=%" PRIu32 ", expected %" PRIu32, Length,
+		          expect + FileNameLength);
+		return FALSE;
+	}
+
+	if (file->find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+	{
+		SetLastError(ERROR_ACCESS_DENIED);
+		return FALSE;
+	}
+
+	WCHAR* fullpath = drive_file_combine_fullpath(file->basepath, Stream_ConstPointer(input),
+	                                              FileNameLength / sizeof(WCHAR));
+	if (!fullpath)
+		return FALSE;
+
+	if (ReplaceIfExists)
+	{
+		if (PathFileExistsW(fullpath))
+		{
+			if (!DeleteFileW(fullpath))
+			{
+				free(fullpath);
+				return FALSE;
+			}
+		}
+	}
+
+#ifdef _WIN32
+	BOOL ok = CreateHardLinkW(fullpath, file->fullpath, NULL);
+#else
+	char* newpath = ConvertWCharToUtf8Alloc(fullpath, NULL);
+	char* oldpath = ConvertWCharToUtf8Alloc(file->fullpath, NULL);
+	BOOL ok = FALSE;
+	if (newpath && oldpath)
+		ok = (link(oldpath, newpath) == 0);
+	if (newpath)
+		free(newpath);
+	if (oldpath)
+		free(oldpath);
+#endif
+
+	free(fullpath);
+	return ok ? TRUE : FALSE;
+}
+
 BOOL drive_file_set_information(DRIVE_FILE* file, UINT32 FsInformationClass, UINT32 Length,
                                 wStream* input)
 {
@@ -888,6 +955,8 @@ BOOL drive_file_set_information(DRIVE_FILE* file, UINT32 FsInformationClass, UIN
 
 		case FileRenameInformation:
 			return drive_file_set_rename_information(file, Length, input);
+		case FileLinkInformation:
+			return drive_file_set_link_information(file, Length, input);
 
 		default:
 			WLog_WARN(TAG, "Unhandled FSInformationClass %s [0x%08" PRIx32 "]",

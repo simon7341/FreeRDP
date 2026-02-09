@@ -111,6 +111,9 @@ typedef UINT (*psRdpdrDriveQueryInformation)(RdpdrServerContext* context, void* 
                                              UINT32 FsInformationClass);
 typedef UINT (*psRdpdrDriveQueryVolumeInformation)(RdpdrServerContext* context, void* callbackData,
                                                    UINT32 deviceId, UINT32 FsInformationClass);
+typedef UINT (*psRdpdrDriveSetInformation)(RdpdrServerContext* context, void* callbackData,
+                                           UINT32 deviceId, UINT32 fileId, UINT32 FsInformationClass,
+                                           const BYTE* buffer, UINT32 length);
 typedef UINT (*psRdpdrDriveQueryInformation)(RdpdrServerContext* context, void* callbackData,
                                              UINT32 deviceId, UINT32 fileId,
                                              UINT32 FsInformationClass);
@@ -142,6 +145,8 @@ typedef void (*psRdpdrOnDriveQueryInformationComplete)(RdpdrServerContext* conte
 typedef void (*psRdpdrOnDriveQueryVolumeInformationComplete)(RdpdrServerContext* context,
                                                              void* callbackData, UINT32 ioStatus,
                                                              const BYTE* buffer, UINT32 length);
+typedef void (*psRdpdrOnDriveSetInformationComplete)(RdpdrServerContext* context, void* callbackData,
+                                                     UINT32 ioStatus);
 typedef void (*psRdpdrOnDriveQueryInformationComplete)(RdpdrServerContext* context,
                                                        void* callbackData, UINT32 ioStatus,
                                                        const BYTE* buffer, UINT32 length);
@@ -201,6 +206,7 @@ struct s_rdpdr_server_context
 	psRdpdrDriveRenameFile DriveRenameFile;
 	psRdpdrDriveQueryInformation DriveQueryInformation;
 	psRdpdrDriveQueryVolumeInformation DriveQueryVolumeInformation;
+	psRdpdrDriveSetInformation DriveSetInformation;
 
 	/*** Drive callbacks registered by the server. ***/
 	psRdpdrOnDeviceCreate OnDriveCreate; /**< Called for devices of type \b RDPDR_DTYP_FILESYSTEM
@@ -218,6 +224,7 @@ struct s_rdpdr_server_context
 	psRdpdrOnDriveRenameFileComplete OnDriveRenameFileComplete;
 	psRdpdrOnDriveQueryInformationComplete OnDriveQueryInformationComplete;
 	psRdpdrOnDriveQueryVolumeInformationComplete OnDriveQueryVolumeInformationComplete;
+	psRdpdrOnDriveSetInformationComplete OnDriveSetInformationComplete;
 
 	/*** Serial Port callbacks registered by the server. ***/
 	psRdpdrOnDeviceCreate OnSerialPortCreate; /**< Called for devices of type \b RDPDR_DTYP_SERIAL
